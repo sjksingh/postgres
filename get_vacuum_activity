@@ -1,0 +1,81 @@
+CREATE OR REPLACE FUNCTION public.get_vacuum_activity(vacuum_threshold integer DEFAULT 1000)
+RETURNS TABLE(description text, result text)
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+    -- Database Version
+    RETURN QUERY
+    SELECT 'Database Version' AS description, version() AS result;
+
+    -- Database Uptime
+    RETURN QUERY
+    SELECT 'Uptime' AS description, (current_timestamp - pg_postmaster_start_time())::TEXT AS result;
+
+    -- Recent Vacuum Activity (Last Vacuum Timestamp)
+    RETURN QUERY
+    SELECT 'Last Vacuum' AS description,
+           relname || ': ' || COALESCE(last_vacuum::text, 'Never') AS result
+    FROM pg_stat_user_tables
+    WHERE last_vacuum IS NOT NULL
+    ORDER BY last_vacuum DESC
+    LIMIT 5;
+
+    -- Recent Auto Vacuum Activity (Last Auto Vacuum Timestamp)
+    RETURN QUERY
+    SELECT 'Last Auto Vacuum' AS description,
+           relname || ': ' || COALESCE(last_autovacuum::text, 'Never') AS result
+    FROM pg_stat_user_tables
+    WHERE last_autovacuum IS NOT NULL
+    ORDER BY last_autovacuum DESC
+    LIMIT 5;
+
+    -- Tables with Highest Dead Tuples (Vacuum Candidates)
+    RETURN QUERY
+    SELECT 'Tables with High Dead Tuples' AS description,
+           relname || ': ' || n_dead_tup AS result
+    FROM pg_stat_user_tables
+    WHERE n_dead_tup >= vacuum_threshold
+    ORDER BY n_dead_tup DESC
+    LIMIT 5;
+
+    -- Vacuum I/O Stats
+    RETURN QUERY
+    SELECT 'Vacuum I/O Stats' AS description,
+           'Buffers Hit: ' || buffers_clean || ', Buffers Dirtied: ' || buffers_backend AS result
+    FROM pg_stat_bgwriter;
+
+    -- Current Active Vacuum Processes
+    RETURN QUERY
+    SELECT 'Active Vacuum Processes' AS description,
+           pid || ': ' || query AS result
+    FROM pg_stat_activity
+    WHERE query LIKE 'autovacuum:%' OR query LIKE 'VACUUM%';
+
+    -- Lock Status on Vacuumed Tables
+    RETURN QUERY
+    SELECT 'Vacuum-Related Locks' AS description,
+           relation || ': ' || locktype || ' - ' || mode AS result
+    FROM pg_locks
+    JOIN pg_stat_user_tables ON pg_locks.relation = pg_stat_user_tables.relid
+    WHERE granted IS FALSE
+    AND relname IS NOT NULL
+    ORDER BY relation;
+
+    -- Unvacuumed Dead Tuples Exceeding Threshold
+    RETURN QUERY
+    SELECT 'Unvacuumed Dead Tuples Above Threshold' AS description,
+           relname || ': ' || n_dead_tup AS result
+    FROM pg_stat_user_tables
+    WHERE n_dead_tup >= vacuum_threshold;
+
+    -- Average Time Between Vacuums
+    RETURN QUERY
+    SELECT 'Average Time Between Auto Vacuums' AS description,
+           relname || ': ' || COALESCE(AVG(EXTRACT(epoch FROM now() - last_autovacuum))::text, 'N/A') || ' seconds' AS result
+    FROM pg_stat_user_tables
+    GROUP BY relname
+    ORDER BY AVG(EXTRACT(epoch FROM now() - last_autovacuum)) DESC
+    LIMIT 5;
+
+END;
+$function$;
