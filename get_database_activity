@@ -1,0 +1,109 @@
+CREATE OR REPLACE FUNCTION public.get_database_activity(activity_threshold integer DEFAULT 10)
+RETURNS TABLE(description text, result text)
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+    -- Database Version
+    RETURN QUERY
+    SELECT 'Database Version' AS description, version() AS result;
+
+    -- Database Uptime
+    RETURN QUERY
+    SELECT 'Uptime' AS description, (current_timestamp - pg_postmaster_start_time())::TEXT AS result;
+
+    -- Top Wait Events
+    RETURN QUERY
+    SELECT 'Top Wait Events' AS description,
+           wait_event_type || ': ' || wait_event || ' (' || cnt || ')' AS result
+    FROM (
+         SELECT wait_event_type, wait_event, count(*) AS cnt
+         FROM pg_stat_activity
+         WHERE wait_event IS NOT NULL
+         GROUP BY wait_event_type, wait_event
+         ORDER BY cnt DESC
+         LIMIT 5
+    ) AS subquery;
+
+    -- Most Active Tables for Updates
+    RETURN QUERY
+    SELECT 'Most Active Tables for Updates' AS description,
+           relname || ': ' || n_tup_upd AS result
+    FROM pg_stat_user_tables
+    WHERE n_tup_upd >= activity_threshold
+    ORDER BY n_tup_upd DESC
+    LIMIT 5;
+
+    -- Most Active Tables for Deletes
+    RETURN QUERY
+    SELECT 'Most Active Tables for Deletes' AS description,
+           relname || ': ' || n_tup_del AS result
+    FROM pg_stat_user_tables
+    WHERE n_tup_del >= activity_threshold
+    ORDER BY n_tup_del DESC
+    LIMIT 5;
+
+    -- Most Active Tables for Selects
+    RETURN QUERY
+    SELECT 'Most Active Tables for Selects' AS description,
+           relname || ': ' || seq_scan AS result
+    FROM pg_stat_user_tables
+    WHERE seq_scan >= activity_threshold
+    ORDER BY seq_scan DESC
+    LIMIT 5;
+
+    -- Slowest Queries (Full Table Scans)
+    RETURN QUERY
+    SELECT 'Slowest Queries (Full Table Scans)' AS description,
+           query || ' (Time: ' || total_time || ' ms)' AS result
+    FROM pg_stat_statements
+    WHERE calls > 0 AND (total_time / NULLIF(calls, 0)) > 1000 -- Adjust threshold as needed
+    ORDER BY total_time DESC
+    LIMIT 5;
+
+    -- Long-Running Queries (Above 5 minutes)
+    RETURN QUERY
+    SELECT 'Long-Running Queries' AS description,
+           state || ': ' || query || ' (Running Time: ' || now() - query_start || ')' AS result
+    FROM pg_stat_activity
+    WHERE state != 'idle'
+      AND now() - query_start > interval '5 minutes'
+    ORDER BY query_start DESC;
+
+    -- Blocking Sessions
+    RETURN QUERY
+    SELECT 'Blocking Sessions' AS description,
+           blocking_activity.pid || ' blocking ' || blocked_activity.pid || ': ' || blocked_activity.query AS result
+    FROM pg_locks blocked_locks
+    JOIN pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+    JOIN pg_locks blocking_locks ON blocking_locks.locktype = blocked_locks.locktype
+        AND blocking_locks.DATABASE IS NOT DISTINCT FROM blocked_locks.DATABASE
+        AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+    JOIN pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+    WHERE NOT blocked_activity.pid = blocking_activity.pid;
+
+    -- Replication Lag (Aurora-Compatible Version)
+    RETURN QUERY
+    SELECT 'Replication Lag' AS description,
+           'Replication lag details not available in Aurora' AS result;
+
+    -- Last Auto Vacuum/Analyze
+    RETURN QUERY
+    SELECT 'Last Auto Vacuum/Analyze' AS description,
+           relname || ': ' || COALESCE(last_autovacuum::text, 'Never') || ' / ' || COALESCE(last_autoanalyze::text, 'Never') AS result
+    FROM pg_stat_user_tables
+    ORDER BY relname;
+
+    -- Database Connections Usage
+    RETURN QUERY
+    SELECT 'Connection Usage' AS description,
+           current_connections || '/' || max_connections || ' connections used (' || round((current_connections::numeric / max_connections::numeric) * 100, 2) || '%)' AS result
+    FROM (
+        SELECT COUNT(*) AS current_connections,
+               setting::int AS max_connections
+        FROM pg_settings
+        WHERE name = 'max_connections'
+        GROUP BY setting
+    ) AS connections;
+
+END;
+$function$;
