@@ -1,0 +1,93 @@
+CREATE OR REPLACE FUNCTION public.get_database_health(dead_tuple_threshold integer DEFAULT 100)
+RETURNS TABLE(description text, result text)
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+    -- Host
+    RETURN QUERY
+    SELECT 'Host' AS description,
+           inet_server_addr()::TEXT AS result;
+
+    -- Check if the database is primary or standby
+    RETURN QUERY
+    SELECT 'Database Mode' AS description,
+           CASE WHEN pg_is_in_recovery() THEN 'Standby/Reader DB (Read Only)' ELSE 'Primary/Writer DB (Read Write)' END AS result;
+
+    -- Uptime
+    RETURN QUERY
+    SELECT 'Uptime' AS description,
+           (current_timestamp - pg_postmaster_start_time())::TEXT AS result;
+
+    -- Database Version
+    RETURN QUERY
+    SELECT 'Database Version' AS description,
+           version() AS result;
+
+    -- Database Reset
+    RETURN QUERY
+    SELECT 'Last DB reset' AS description,
+           stats_reset::TEXT AS result
+    FROM pg_stat_database
+    WHERE datname NOT IN ('postgres', 'template0', 'template1', 'rdsadmin')
+          AND datname IS NOT NULL;
+
+    -- Database Size
+    RETURN QUERY
+    SELECT 'Database Size' AS description,
+           datname || ': ' || ROUND(pg_database_size(datname) / 1024 / 1024 / 1024, 2)::TEXT || ' GB' AS result
+    FROM pg_database
+    WHERE datname NOT IN ('postgres', 'template0', 'template1', 'rdsadmin');
+
+    -- Cache Hit Ratio
+    RETURN QUERY
+    SELECT 'Cache Hit Ratio' AS description,
+           (sum(heap_blks_hit) * 100.0 / NULLIF(sum(heap_blks_hit) + sum(heap_blks_read), 0))::TEXT AS result
+    FROM pg_statio_user_tables;
+
+    -- Database Hit Ratio
+    RETURN QUERY
+    SELECT 'Database Hit Ratio' AS description,
+           (blks_hit * 100.0 / NULLIF((blks_hit + blks_read), 0))::TEXT AS result
+    FROM pg_stat_database
+    WHERE datname NOT IN ('postgres', 'template0', 'template1');
+
+    -- Unvacuumed Dead Tuples
+    RETURN QUERY
+    SELECT 'Unvacuumed Dead Tuples' AS description,
+           relname || ': ' || n_dead_tup::TEXT AS result
+    FROM pg_stat_user_tables
+    WHERE n_dead_tup > dead_tuple_threshold;
+
+    -- Commit Ratio of Database
+    RETURN QUERY
+    SELECT 'Transaction Commit Ratio' AS description,
+           ROUND((xact_commit::float * 100 / NULLIF((xact_commit + xact_rollback), 0))::numeric, 2)::TEXT AS result
+    FROM pg_stat_database
+    WHERE datname NOT IN ('postgres', 'template0', 'template1');
+
+    -- Temp File Usage
+    RETURN QUERY
+    SELECT 'Temporary File Usage' AS description,
+           datname || ': ' || ROUND(temp_bytes / 1024 / 1024, 2)::TEXT || ' MB' AS result
+    FROM pg_stat_database
+    WHERE datname NOT IN ('postgres', 'template0', 'template1')
+      AND temp_files > 0;
+
+    -- Frequency of Checkpoints
+    RETURN QUERY
+    SELECT 'Checkpoints' AS description,
+           checkpoints_req || ' timed: ' || checkpoints_timed::TEXT AS result
+    FROM pg_stat_bgwriter;
+
+    -- Invalid Indexes
+    RETURN QUERY
+    SELECT 'Invalid Indexes' AS description,
+           n.nspname || '.' || c.relname || ': ' || i.relname || ' is Invalid' AS result
+    FROM pg_index ix
+    JOIN pg_class c ON c.oid = ix.indrelid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE NOT ix.indisvalid;
+
+END;
+$function$;
